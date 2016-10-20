@@ -1,0 +1,176 @@
+#!/bin/bash
+
+# a quick script to create a WordPress distribution .zip 
+# on raw.githubusercontent.com as well as a json file to be used by 
+# YahnisElsts's plugin-update-checker for update checking
+
+# FUNCS _______________________________________________________________________
+
+exiterr () {
+	printf "\nERROR: $1\nNow exiting...\n"
+	exit 1
+}
+is_z () { [[ -z "$1" ]] || return 1; }
+str_eq () { [[ "$1" = "$2" ]] || return 1; }
+num_eq () { [ "$1" -eq "$2" ] || return 1; }
+
+# VARS ________________________________________________________________________
+
+caller_path="$(pwd)" 
+
+dist_dir="$caller_path/dist"
+checker_lib="$caller_path/plugin-update-checker"
+
+this_script=`basename "$0"`; echo "$me"
+repo_name="$(basename "$caller_path")"
+
+sys_username=$(id -F || id -un || whoami || git config user.name )
+git_email=$(git config user.email || "")
+git_username=$(git config user.name || id -F || id -un || whoami)
+
+# UPDATE LIB ____________________________________________________________________
+
+update_lib () {
+	if [ ! -d "$checker_lib" ]; then 
+		echo "./plugin-update-checker/ not found. Cloning it from GitHub..." 
+		git clone git@github.com:YahnisElsts/plugin-update-checker.git
+	else
+		echo "./plugin-update-checker/ was found. Checking for updates (git pull)..." 
+		cd "$checker_lib"
+		git pull || reclone="yes"
+		if str_eq "$reclone" "yes"; then
+			printf "git pull failed! Re-cloning from GitHub...\n\n"
+			cd "$caller_path"
+			rm -rf "$checker_lib"
+			git clone git@github.com:YahnisElsts/plugin-update-checker.git
+		fi
+	fi
+}
+
+# UPDATE DIST ____________________________________________________________________
+
+update_dist () {
+	if [ ! -d "$dist_dir" ]; then 
+		echo "creating ./dist/"
+		mkdir "$dist_dir" || exiterr "mkdir $dist_dir failed."
+	fi
+
+	printf "Enter the git repository name (for json filename and url) or [ENTER] for '$repo_name': "
+	read temp
+	! is_z "$temp" && repo_name="$temp"
+
+	json_file="$dist_dir/$repo_name.json"
+
+	if [ -f "$json_file" ]; then
+		printf ".dist/$repo_name.json found:\n\n"
+		echo "--BEGIN--"
+		cat "$json_file"
+		echo "--END--"; echo
+		printf "Enter 'y' to proceed with this file\n"
+		printf "Enter 'n' to abort\n"
+		printf "Hit [ENTER] to change it's contents\n"
+		printf "Your selection: "
+		read json_plan
+	fi
+	if is_z "$json_plan"; then
+
+		[ -f "$json_file" ] && cp "$json_file"{,.bak}
+		
+		printf "\nSetting ./dist/$repo_name.json contents:\n"
+
+		printf "Enter the product name within WordPress or [ENTER] for '$repo_name': "
+		read dist_name
+		is_z "$dist_name" && dist_name="$repo_name"
+
+		printf "Enter a version number or [ENTER] for '0.1': "
+		read ver
+		is_z "$ver" && ver="0.1"
+
+		printf "Enter a git branch name or [ENTER] for 'master': "
+		read branch
+		is_z "$branch" && branch="master"
+
+		url="https://raw.githubusercontent.com/$git_username/$repo_name/$branch/dist/$repo_name.zip"
+		
+		printf "Enter the author name you want displayed or [ENTER] for '$sys_username': "
+		read author
+		is_z "$author" && author="$sys_username"
+
+		printf "Git user name in url will be $git_username. Hit [ENTER] or something else: "
+		read git_un_temp
+		! is_z "$git_un_temp" && git_username="$git_un_temp"
+
+		printf "Enter a discription or just hit enter: "
+		read desc
+
+		JSON="{\n"
+		JSON+="    \"name\" : \"$dist_name\",\n"
+		JSON+="    \"version\" : \"$ver\",\n"
+		JSON+="    \"author\" : \"$author\",\n"
+		JSON+="    \"download_url\" : \"$url\",\n"
+		JSON+="    \"sections\" : {\n"
+		JSON+="        \"description\" : \"$desc\"\n"
+		JSON+="    }\n"
+		JSON+="}\n"
+		printf "$JSON" > "$json_file"
+
+	elif ! str_eq "$json_plan" "y"; then
+		echo "exiting..."
+		exit 0
+	fi
+}
+
+run_zip () {
+	zip -r "$dist_dir/$repo_name.zip" ./ -x ".git/*" "dist/*" "$this_script"
+}
+
+# CHECK REQUIRE _________________________________________________________________
+
+check_require () {
+
+	cd "$caller_path"
+
+	require_code=$(cat <<EOF
+
+	require 'plugin-update-checker/plugin-update-checker.php';
+	\$myUpdateChecker = PucFactory::buildUpdateChecker(
+	    '$url',
+	    __FILE__
+	);
+	\n
+	EOF
+	)
+
+	main_php="$(find . -type f -name '*php' -print0 -maxdepth 1 | xargs -0 grep -l "Plugin Name")"
+
+	if ! is_z "$main_php"; then 
+		if ! grep -q "plugin-update-checker/plugin-update-checker.php" "$main_php"; then
+			echo "The main php file ($main_php) does not include plugin-update-checker.php"
+			echo "require statement being inserted..."
+			touch "plugin-update-checker/insert-temp.txt"
+			printf "$require_code" > "plugin-update-checker/insert-temp.txt"
+			sed -i '' "/\*\//r plugin-update-checker/insert-temp.txt" "$main_php"
+			# rm "plugin-update-checker/insert-temp.txt"
+		elif ! grep -q "$url" "$main_php"; then
+			echo "The main php file identified as $main_php does not point to $url"
+			echo "Be sure it contains: "
+			printf "$require_code"
+		fi
+	else
+		echo "Main php file not found in working directory. When created it should include:"
+		printf "$require_code"
+	fi
+}
+
+if num_eq "$#" "0"; then
+	update_lib
+	update_dist
+	run_zip
+	check_require
+elif str_eq "$1" --update-lib
+	update_lib
+elif str_eq "$1" --skip-zip
+	update_lib
+	update_dist
+	check_require
+fi
